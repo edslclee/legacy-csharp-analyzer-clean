@@ -5,7 +5,6 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
-  workflow_dispatch: {}   # 수동 실행 버튼
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,10 +14,9 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     strategy:
       matrix:
-        node: [20.x]
+        node: [22.x]  # 로컬과 동일 (v22)
 
     steps:
       - name: Checkout
@@ -29,49 +27,32 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-          # 최상위 lockfile 기준으로 캐시
-          cache-dependency-path: |
-            package-lock.json
 
       - name: Print versions
         run: |
           node -v
           npm -v
 
-      # ── Workspace 설치 (루트) ─────────────────────────────────────────────
+      # Workspaces 루트에서 한 번만 설치
       - name: Install (root, workspaces)
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund || npm install --no-audit --no-fund
-          else
-            npm install --no-audit --no-fund
-          fi
+        run: npm ci --no-audit --no-fund
 
-      # ── WEB ──────────────────────────────────────────────────────────────
+      # ---- WEB ----
       - name: Build (web)
         working-directory: apps/web
         env:
           NODE_OPTIONS: --max-old-space-size=4096
-          # 필요 시 API 엔드포인트 주입
+          # 필요 시 공개가능한 값만 여기에. (비밀키는 secrets 사용)
           # VITE_API_BASE: http://localhost:8787
-        run: npm run build --if-present
+        run: npm run build
 
-      # 빌드 결과물 보관(선택)
-      - name: Upload web dist
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-dist
-          path: apps/web/dist
-
-      # ── API ──────────────────────────────────────────────────────────────
+      # ---- API ----
       - name: Typecheck (api)
         working-directory: apps/api
-        run: npm run typecheck --if-present
+        run: npm run typecheck
 
       - name: Test (api)
         working-directory: apps/api
         env:
           NODE_ENV: test
-          CI: true
-        run: npm test --silent --if-present
+        run: npm test --silent
