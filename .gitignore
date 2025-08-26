@@ -1,0 +1,11 @@
+# .gitignore (루트)
+node_modules/
+dist/
+apps/**/node_modules/
+apps/**/dist/
+*.log
+.env
+*.tsbuildinfo
+coverage/
+.vscode/
+.DS_Store

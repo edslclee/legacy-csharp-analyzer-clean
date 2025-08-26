@@ -1,0 +1,77 @@
+name: CI / Build & Test (web+api)
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch: {}   # 수동 실행 버튼
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        node: [20.x]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          # 최상위 lockfile 기준으로 캐시
+          cache-dependency-path: |
+            package-lock.json
+
+      - name: Print versions
+        run: |
+          node -v
+          npm -v
+
+      # ── Workspace 설치 (루트) ─────────────────────────────────────────────
+      - name: Install (root, workspaces)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      # ── WEB ──────────────────────────────────────────────────────────────
+      - name: Build (web)
+        working-directory: apps/web
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+          # 필요 시 API 엔드포인트 주입
+          # VITE_API_BASE: http://localhost:8787
+        run: npm run build --if-present
+
+      # 빌드 결과물 보관(선택)
+      - name: Upload web dist
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+
+      # ── API ──────────────────────────────────────────────────────────────
+      - name: Typecheck (api)
+        working-directory: apps/api
+        run: npm run typecheck --if-present
+
+      - name: Test (api)
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          CI: true
+        run: npm test --silent --if-present
