@@ -1,329 +1,358 @@
-// apps/web/src/App.tsx
-import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
-import { analyze, health } from './lib/api'
-import { readFiles, estimateBytes } from './lib/fileingest'
-import { Tabs } from './components/Tabs'
-import type { TabKey } from './components/Tabs'
-import type { AnalysisResult, Ingested } from './types'
-import { downloadJSON, downloadTablesCSV, downloadCrudCSV, downloadDocLinksCSV, downloadText } from './lib/exporters'
-import { buildMermaidERD, isLikelyValidMermaid } from './lib/erd'
+import { useEffect, useMemo, useState } from 'react';
+import { analyzeOrMock, apiHealth, isUsingMock, type AnalysisResult } from './lib/api';
+import { downloadJSON, exportCsvZip, exportPdf, exportDocx, exportAllZip } from './lib/exporters';
+import { ErdViewer } from './components';
 
-/** ===== Error Boundary: 렌더 예외를 UI로 보여줌 ===== */
-class ErrorBoundary extends React.Component<{children: React.ReactNode}, {error: any}> {
-  constructor(props:any){ super(props); this.state = { error: null } }
-  static getDerivedStateFromError(error:any){ return { error } }
-  componentDidCatch(error:any, info:any){ console.error('Render error:', error, info) }
-  render(){
-    // @ts-ignore
-    if (this.state.error) {
-      // @ts-ignore
-      const err = this.state.error
-      return (
-        <div className="m-4 p-4 border border-red-300 rounded bg-red-50 text-red-700">
-          <div className="font-semibold">렌더 중 오류가 발생했습니다.</div>
-          <pre className="text-xs overflow-auto">{String(err?.stack || err)}</pre>
-          <button className="mt-2 px-3 py-1 rounded border" onClick={()=>location.reload()}>새로고침</button>
-        </div>
-      )
-    }
-    // @ts-ignore
-    return this.props.children
-  }
-}
+type InputFile = { name: string; type: 'cs' | 'sql' | 'doc'; content: string };
 
-/** ===== 안전한 Mermaid 렌더러: 동적 import + 예외 처리 ===== */
-function SafeMermaid({ code }: { code: string }) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [err, setErr] = useState<string | null>(null)
+const TABS = ['ERD', 'TABLES', 'CRUD', 'PROCESS', 'DOCS'] as const;
+type TabKey = typeof TABS[number];
 
-  useEffect(() => {
-    let cancel = false
-    ;(async () => {
-      setErr(null)
-      try {
-        if (!code?.trim()) return
-        const mermaid = (await import('mermaid')).default
-        mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' })
-        const id = 'erd-' + Math.random().toString(36).slice(2)
-        const { svg } = await mermaid.render(id, code)
-        if (!cancel && ref.current) ref.current.innerHTML = svg
-      } catch (e:any) {
-        console.error('Mermaid render error', e)
-        if (!cancel) setErr(e?.message || 'Mermaid 렌더 오류')
-      }
-    })()
-    return () => { cancel = true }
-  }, [code])
-
-  if (err) {
-    return (
-      <div className="p-3 border border-yellow-300 rounded bg-yellow-50 text-yellow-800">
-        <div className="font-semibold">ERD 렌더 실패</div>
-        <div className="text-xs">{err}</div>
-        <details className="text-xs mt-2">
-          <summary>원본 코드 보기</summary>
-          <pre className="overflow-auto">{code}</pre>
-        </details>
-      </div>
-    )
-  }
-  return <div ref={ref} className="border rounded-xl p-4 bg-white overflow-auto" />
-}
-
-/** ===== 메인 앱 ===== */
 export default function App() {
-  const [srcFiles, setSrcFiles] = useState<File[]>([])
-  const [docFiles, setDocFiles] = useState<File[]>([])
-  const [tab, setTab] = useState<TabKey>('ERD')
-  const [payloadPreview, setPayloadPreview] = useState<Ingested[]>([])
-  const [useMock, setUseMock] = useState(false) // API 실패 시 목업 보기 토글
+  // 파일 상태
+  const [codeFiles, setCodeFiles] = useState<InputFile[]>([]);
+  const [docFiles, setDocFiles] = useState<InputFile[]>([]);
+  // 결과/상태
+  const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [apiLabel, setApiLabel] = useState<string>('...');
 
-  const { data: healthInfo } = useQuery({ queryKey: ['health'], queryFn: health })
+  // 탭
+  const [activeTab, setActiveTab] = useState<TabKey>('DOCS');
 
-  const { mutate, data, isPending, error } = useMutation({
-    mutationFn: async () => {
-      const src = await readFiles(srcFiles, ['cs','sql'])
-      const docs = await readFiles(docFiles, ['doc'])
-      const files = [...src, ...docs]
-      setPayloadPreview(files)
-      if (useMock) return mockResult as AnalysisResult
-      return await analyze(files)
+  // API 상태 라벨링
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        if (isUsingMock()) {
+          if (!cancelled) setApiLabel('mock mode');
+        } else {
+          const h = await apiHealth();
+          if (!cancelled) setApiLabel(h?.model || 'online');
+        }
+      } catch {
+        if (!cancelled) setApiLabel('offline');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 업로드 핸들러들
+  const onPickCode = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    const target = await filesToInputs(files, ['.cs', '.sql', '.zip']);
+    setCodeFiles(target);
+    setResult(null);
+  };
+
+  const onPickDoc = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    const target = await filesToInputs(files, ['.txt', '.md', '.pdf', '.docx']);
+    setDocFiles(target);
+    setResult(null);
+  };
+
+  // 분석 실행
+  const canAnalyze = useMemo(() => true, []);
+  const onAnalyze = async () => {
+    if (!canAnalyze) return;
+    setLoading(true);
+    try {
+      const payload = [...codeFiles, ...docFiles];
+      const data = await analyzeOrMock(payload);
+      setResult(data);
+      // 결과가 오면 기본 탭은 DOCS로 (또는 원하는 탭)
+      setActiveTab('DOCS');
+    } catch (e) {
+      console.error(e);
+      alert('분석 중 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
     }
-  })
+  };
 
-  // API 실패 시에도 화면 유지 + 목업 보기 버튼 제공
-  const result: AnalysisResult | null = data ?? (useMock ? mockResult : null)
-
-  const disabled = useMemo(() => srcFiles.length === 0 && !useMock, [srcFiles.length, useMock])
-  const approxBytes = useMemo(() => estimateBytes(payloadPreview), [payloadPreview])
-
-  // === ERD 코드 선택: 서버 코드가 유효하지 않으면 테이블 기반 대체 코드 사용 ===
-  const erdCode = useMemo(() => {
-    if (!result) return ''
-    return isLikelyValidMermaid(result.erd_mermaid)
-      ? String(result.erd_mermaid)
-      : buildMermaidERD(result.tables || [])
-  }, [result])
+  // 다운로드
+  const onDownloadJson = () => {
+    if (!result) return;
+    downloadJSON(result, 'result.json');
+  };
+  const onExportCsvZip = () => {
+    if (!result) return;
+    exportCsvZip(result, 'analysis-csv.zip');
+  };
+  const onExportPdf = () => {
+    if (!result) return;
+    exportPdf(result, { filename: 'AsIs_Report.pdf' });
+  };
+  const onExportDocx = () => {
+    if (!result) return;
+    exportDocx(result, { filename: 'AsIs_Report.docx' });
+  };
+  const onExportBundle = () => {
+    if (!result) return;
+    exportBundleZip(result, { filename: 'AsIs_Package.zip' });
+  };
 
   return (
-    <ErrorBoundary>
-      <div className="min-h-screen p-6 space-y-6">
-        <header className="flex items-center justify-between">
-          <h1 className="text-2xl font-bold">As-Is Navigator (Prototype)</h1>
-          <div className="text-sm text-zinc-600">
-            API: <span className="font-mono">{healthInfo?.model ?? '...'}</span>
-          </div>
-        </header>
-
-        {/* 업로드 영역 */}
-        <section className="grid md:grid-cols-2 gap-4">
-          <div className="border rounded-xl p-4 bg-white">
-            <h2 className="font-semibold mb-2">Source / Schema (.cs, .sql, .zip)</h2>
-            <input type="file" multiple onChange={(e)=> setSrcFiles(Array.from(e.target.files||[]))}/>
-            <p className="text-xs text-zinc-500 mt-1">* Zip 내부 .cs/.sql만 추출. 총 5MB 제한(서버 검증).</p>
-            {srcFiles.length>0 && <p className="text-xs text-zinc-700 mt-2">선택: {srcFiles.map(f=>f.name).join(', ')}</p>}
-          </div>
-          <div className="border rounded-xl p-4 bg-white">
-            <h2 className="font-semibold mb-2">Documentation (txt 권장)</h2>
-            <input type="file" multiple onChange={(e)=> setDocFiles(Array.from(e.target.files||[]))}/>
-            <p className="text-xs text-zinc-500 mt-1">* PDF/DOCX는 후속 Iteration에서 텍스트 추출 지원 예정.</p>
-            {docFiles.length>0 && <p className="text-xs text-zinc-700 mt-2">선택: {docFiles.map(f=>f.name).join(', ')}</p>}
-          </div>
-        </section>
-
-        {/* 제어 버튼들 */}
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            className="px-4 py-2 rounded-xl bg-black text-white disabled:bg-zinc-400"
-            disabled={disabled || isPending}
-            onClick={()=> mutate()}
-          >
-            {isPending ? 'Analyzing...' : (useMock ? 'Show Mock' : 'Start Analysis')}
-          </button>
-
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={useMock} onChange={(e)=> setUseMock(e.target.checked)} />
-            API 대신 목업 데이터 사용
-          </label>
-
-          {payloadPreview.length>0 && (
-            <span className="text-xs text-zinc-600">
-              payload ~ {Math.ceil(approxBytes/1024)} KB
-            </span>
-          )}
-
-          {error && (
-            <span className="text-sm text-red-600">
-              {String((error as Error).message || error)} — 위 “API 대신 목업 데이터 사용”을 켜고 UI부터 확인하세요.
-            </span>
-          )}
+    <div className="min-h-screen bg-gray-50">
+      <header className="border-b bg-white">
+        <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
+          <h1 className="text-xl font-semibold">As-Is Navigator (Prototype)</h1>
+          <div className="text-sm text-gray-500">API: {apiLabel}</div>
         </div>
+      </header>
 
-        {/* 결과 */}
-        {result && (
-          <section className="space-y-3">
-            <div className="flex flex-wrap items-center gap-3">
-              <Tabs active={tab} onChange={setTab} />
+      <main className="mx-auto max-w-6xl px-6 py-6">
+        {/* 1) 파일 추가 */}
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="rounded-lg border bg-white p-5">
+            <h2 className="text-lg font-semibold mb-4">1) 파일 추가</h2>
 
-              {/* 다운로드 버튼들 */}
-              <div className="ml-auto flex flex-wrap gap-2">
-                <button
-                  className="px-3 py-1 rounded border"
-                  onClick={()=> downloadJSON(result, 'result.json')}
-                >Download result.json</button>
-
-                {tab === 'ERD' && (
-                  <>
-                    <button
-                      className="px-3 py-1 rounded border"
-                      onClick={()=>{
-                        // 화면에 사용하는 것과 동일한 코드로 내보내기
-                        const codeForDownload = erdCode || ''
-                        downloadText(codeForDownload, 'erd.mmd')
-                      }}
-                    >Export Mermaid</button>
-                  </>
-                )}
-                {tab === 'TABLES' && (
-                  <button className="px-3 py-1 rounded border" onClick={()=> downloadTablesCSV(result.tables || [])}>Export CSV</button>
-                )}
-                {tab === 'CRUD' && (
-                  <button className="px-3 py-1 rounded border" onClick={()=> downloadCrudCSV(result.crud_matrix || [])}>Export CSV</button>
-                )}
-                {tab === 'PROCESS' && (
-                  <button className="px-3 py-1 rounded border" onClick={()=> downloadJSON(result.processes || [], 'processes.json')}>Export JSON</button>
-                )}
-                {tab === 'DOCS' && (
-                  <button className="px-3 py-1 rounded border" onClick={()=> downloadDocLinksCSV(result.doc_links || [])}>Export CSV</button>
-                )}
+            <div className="mb-6">
+              <div className="text-sm text-gray-600 mb-2">코드/SQL 파일</div>
+              <div className="flex items-center gap-3">
+                <label className="inline-flex">
+                  <input type="file" className="hidden" multiple onChange={onPickCode} />
+                  <span className="rounded border px-3 py-2 cursor-pointer">파일 선택</span>
+                </label>
+                <span className="text-sm text-gray-500">
+                  {codeFiles.length ? `${codeFiles.length}개 선택됨` : '선택된 파일 없음'}
+                </span>
               </div>
+              <div className="text-xs text-gray-400 mt-2">*.cs, *.sql, *.zip(내부 .cs/.sql) 지원</div>
             </div>
 
-            {/* 탭 내용 (필드가 없거나 빈 배열이어도 안전 렌더) */}
-            {tab==='ERD' && <SafeMermaid code={erdCode} />}
-
-            {tab==='TABLES' && (
-              <div className="border rounded-xl p-4 bg-white overflow-auto">
-                <table className="w-full text-sm">
-                  <thead><tr><th className="text-left p-2">Table</th><th className="text-left p-2">Columns</th></tr></thead>
-                  <tbody>
-                    {(result.tables || []).map(t=>(
-                      <tr key={t.name} className="align-top border-t">
-                        <td className="p-2 font-medium">{t.name}</td>
-                        <td className="p-2">
-                          <ul className="list-disc ml-5">
-                            {(t.columns || []).map(c=>(
-                              <li key={c.name}>
-                                {c.name}{c.type?`:${c.type}`:''}
-                                {c.pk?' [PK]':''}{c.nullable===false?' [NOT NULL]':''}
-                                {c.fk?` [FK→${c.fk.table}.${c.fk.column}]`:''}
-                              </li>
-                            ))}
-                          </ul>
-                        </td>
-                      </tr>
-                    ))}
-                    {(!result.tables || result.tables.length===0) && (
-                      <tr><td className="p-2" colSpan={2}>표시할 테이블이 없습니다.</td></tr>
-                    )}
-                  </tbody>
-                </table>
+            <div className="mb-6">
+              <div className="text-sm text-gray-600 mb-2">문서 파일</div>
+              <div className="flex items-center gap-3">
+                <label className="inline-flex">
+                  <input type="file" className="hidden" multiple onChange={onPickDoc} />
+                  <span className="rounded border px-3 py-2 cursor-pointer">파일 선택</span>
+                </label>
+                <span className="text-sm text-gray-500">
+                  {docFiles.length ? `${docFiles.length}개 선택됨` : '선택된 파일 없음'}
+                </span>
               </div>
-            )}
+              <div className="text-xs text-gray-400 mt-2">* txt 우선, PDF/DOCX는 후속 지원 예정</div>
+            </div>
 
-            {tab==='CRUD' && (
-              <div className="border rounded-xl p-4 bg-white overflow-auto">
-                <table className="w-full text-sm">
-                  <thead><tr><th className="text-left p-2">Process</th><th className="text-left p-2">Table</th><th className="p-2">Ops</th></tr></thead>
-                  <tbody>
-                    {(result.crud_matrix || []).map((r,i)=>(
-                      <tr key={i} className="border-t">
-                        <td className="p-2">{r.process}</td>
-                        <td className="p-2">{r.table}</td>
-                        <td className="p-2">{(r.ops||[]).join(', ')}</td>
-                      </tr>
-                    ))}
-                    {(!result.crud_matrix || result.crud_matrix.length===0) && (
-                      <tr><td className="p-2" colSpan={3}>표시할 CRUD 항목이 없습니다.</td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            <button
+              className="rounded-md border px-4 py-2 text-sm disabled:opacity-50"
+              onClick={onAnalyze}
+              disabled={loading}
+            >
+              {loading ? '분석 중...' : '분석 실행'}
+            </button>
 
-            {tab==='PROCESS' && (
-              <div className="border rounded-xl p-4 bg-white overflow-auto">
-                <ul className="list-disc ml-5">
-                  {(result.processes || []).map(p=>(
-                    <li key={p.name} className="mb-2">
-                      <span className="font-medium">{p.name}</span> — {p.description||''}
-                      {p.children?.length ? <div className="text-xs text-zinc-600">children: {p.children.join(' > ')}</div> : null}
-                    </li>
-                  ))}
-                  {(!result.processes || result.processes.length===0) && (
-                    <li className="text-sm text-zinc-600">표시할 프로세스가 없습니다.</li>
+            <div className="text-xs text-gray-400 mt-4">
+              ※ mock 모드에서는 파일 없이도 실행됩니다.
+            </div>
+          </div>
+
+          {/* 2) 결과 & 다운로드 */}
+          <div className="rounded-lg border bg-white p-5">
+            <h2 className="text-lg font-semibold mb-4">2) 결과 & 다운로드</h2>
+
+            <div className="flex items-center gap-3 mb-4">
+              <button className="rounded-md border px-3 py-2 text-sm" onClick={onDownloadJson}>
+                JSON
+              </button>
+              <button className="rounded-md border px-3 py-2 text-sm" onClick={onExportCsvZip}>
+                CSV (zip)
+              </button>
+              <button className="rounded-md border px-3 py-2 text-sm" onClick={onExportPdf}>
+                PDF
+              </button>
+              <button className="rounded-md border px-3 py-2 text-sm" onClick={onExportDocx}>
+                DOCX
+              </button>
+              <button className="rounded-md border px-3 py-2 text-sm" onClick={onExportBundle}>
+                ZIP (All)
+              </button>
+            </div>
+
+            {/* 하위 탭: ERD / TABLES / CRUD / PROCESS / DOCS */}
+            <div className="flex gap-2 mb-3">
+              {TABS.map((t) => (
+                <button
+                  key={t}
+                  className={`rounded-md border px-3 py-1.5 text-sm ${
+                    activeTab === t ? 'bg-black text-white' : ''
+                  }`}
+                  onClick={() => setActiveTab(t)}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+
+            <div className="min-h-[280px] rounded border p-3 bg-white">
+              {!result ? (
+                <div className="text-sm text-gray-500">
+                  아직 결과가 없습니다. 파일을 추가하고 “분석 실행”을 눌러주세요.
+                </div>
+              ) : (
+                <>
+                  {activeTab === 'ERD' && <ErdViewer code={result.erd_mermaid} />}
+
+                  {activeTab === 'TABLES' && (
+                    <TablesView data={result} />
                   )}
-                </ul>
-              </div>
-            )}
 
-            {tab==='DOCS' && (
-              <div className="border rounded-xl p-4 bg-white overflow-auto">
-                <ul className="list-disc ml-5">
-                  {(result.doc_links || []).map((d,i)=>(
-                    <li key={i} className="mb-1"><b>{d.doc}</b>: “{d.snippet}” → {d.related}</li>
-                  ))}
-                  {(!result.doc_links || result.doc_links.length===0) && (
-                    <li className="text-sm text-zinc-600">문서 매핑 결과가 없습니다.</li>
+                  {activeTab === 'CRUD' && (
+                    <CrudView data={result} />
                   )}
-                </ul>
-              </div>
-            )}
 
-            <footer className="text-xs text-zinc-500 pt-2">Generated by As-Is Navigator</footer>
-          </section>
-        )}
+                  {activeTab === 'PROCESS' && (
+                    <ProcessView data={result} />
+                  )}
 
-        {!result && !isPending && !error && (
-          <p className="text-sm text-zinc-600">파일을 업로드하고 “Start Analysis”를 눌러 결과를 확인하세요.</p>
-        )}
-      </div>
-    </ErrorBoundary>
-  )
+                  {activeTab === 'DOCS' && (
+                    <DocsView data={result} />
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer className="py-10 text-center text-xs text-gray-400">
+        Generated by As-Is Navigator
+      </footer>
+    </div>
+  );
 }
 
-/** ===== 최소 목업 데이터 (API 실패 시 UI 확인용) ===== */
-const mockResult: AnalysisResult = {
-  tables: [
-    { name: 'Users', columns: [
-      { name: 'Id', type: 'int', pk: true, nullable: false },
-      { name: 'Name', type: 'varchar(100)' }
-    ]},
-    { name: 'Orders', columns: [
-      { name: 'Id', type: 'int', pk: true },
-      { name: 'UserId', type: 'int', fk: { table: 'Users', column: 'Id' } }
-    ]},
-  ],
-  erd_mermaid: `erDiagram
-  Users ||--o{ Orders : has
-  Users {
-    int Id PK
-    varchar Name
+/* ------------------- 하위 뷰 (간단한 리스트 렌더링) ------------------- */
+
+function TablesView({ data }: { data: AnalysisResult }) {
+  return (
+    <div className="overflow-auto">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="text-left border-b">
+            <th className="py-2 pr-4">Table</th>
+            <th className="py-2">Columns</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.tables?.map((t, idx) => (
+            <tr key={idx} className="border-b align-top">
+              <td className="py-2 pr-4 font-medium">{t.name}</td>
+              <td className="py-2">
+                <ul className="list-disc pl-5">
+                  {t.columns?.map((c, i) => (
+                    <li key={i}>
+                      {c.name}:{' '}
+                      <span className="opacity-70">{c.type || 'unknown'}</span>
+                      {c.pk ? ' [PK]' : ''}
+                      {c.fk ? ` [FK→${c.fk.table}.${c.fk.column}]` : ''}
+                      {c.nullable === false ? ' [NOT NULL]' : ''}
+                    </li>
+                  ))}
+                </ul>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CrudView({ data }: { data: AnalysisResult }) {
+  return (
+    <div className="overflow-auto">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="text-left border-b">
+            <th className="py-2 pr-4">Process</th>
+            <th className="py-2 pr-4">Table</th>
+            <th className="py-2">Ops</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.crud_matrix?.map((r, i) => (
+            <tr key={i} className="border-b">
+              <td className="py-2 pr-4">{r.process}</td>
+              <td className="py-2 pr-4">{r.table}</td>
+              <td className="py-2">{r.ops?.join(', ')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ProcessView({ data }: { data: AnalysisResult }) {
+  return (
+    <div className="overflow-auto">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="text-left border-b">
+            <th className="py-2 pr-4">Process</th>
+            <th className="py-2">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.processes?.map((p, i) => (
+            <tr key={i} className="border-b">
+              <td className="py-2 pr-4">{p.name}</td>
+              <td className="py-2">{p.description || ''}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function DocsView({ data }: { data: AnalysisResult }) {
+  return (
+    <div className="overflow-auto">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="text-left border-b">
+            <th className="py-2 pr-4">Doc</th>
+            <th className="py-2 pr-4">Snippet</th>
+            <th className="py-2">Related</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.doc_links?.map((d, i) => (
+            <tr key={i} className="border-b">
+              <td className="py-2 pr-4 font-medium">{d.doc}</td>
+              <td className="py-2 pr-4">{d.snippet}</td>
+              <td className="py-2">{d.related}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ------------------- 유틸 ------------------- */
+
+async function filesToInputs(files: File[], allowExts: string[]): Promise<InputFile[]> {
+  const out: InputFile[] = [];
+  for (const f of files) {
+    const lower = f.name.toLowerCase();
+    const ok = allowExts.some((ext) => lower.endsWith(ext));
+    if (!ok) continue;
+    const text = await f.text();
+    out.push({
+      name: f.name,
+      type: lower.endsWith('.cs') ? 'cs' : lower.endsWith('.sql') ? 'sql' : 'doc',
+      content: text,
+    });
   }
-  Orders {
-    int Id PK
-    int UserId FK
-  }`,
-  crud_matrix: [
-    { process: 'UserManage', table: 'Users', ops: ['C','R','U','D'] },
-    { process: 'OrderManage', table: 'Orders', ops: ['C','R','U','D'] }
-  ],
-  processes: [
-    { name: 'UserManage', description: '사용자 등록/조회/수정/삭제' },
-    { name: 'OrderManage', description: '주문 등록/조회/수정/삭제', children: ['Create','List','Edit','Delete'] }
-  ],
-  doc_links: [
-    { doc: 'manual.txt', snippet: 'Users can be created and edited...', related: 'Users' }
-  ]
+  return out;
 }
