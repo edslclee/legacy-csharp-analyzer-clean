@@ -12,9 +12,11 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
+    "@types/mermaid": "^9.1.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.6.1",
     "express": "^4.19.2",
+    "mermaid": "^11.10.1",
     "openai": "^4.55.0",
     "zod": "^3.23.8"
   },

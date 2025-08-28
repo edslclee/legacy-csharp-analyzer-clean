@@ -2,7 +2,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022", "DOM", "ESNext", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
@@ -16,5 +16,5 @@
     },
     "noEmit": true
   },
-  "include": ["src", "vite.config.ts", "tsconfig.app.json", "tsconfig.node.json"]
+  "include": ["src", "vite.config.ts", "tsconfig.app.json", "tsconfig.node.json", "src/shims.d.ts"]
 }
