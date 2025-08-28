@@ -56,3 +56,11 @@ jobs:
         env:
           NODE_ENV: test
         run: npm test --silent
+      
+      - name: Typecheck (web)
+        working-directory: apps/web
+        run: npm run typecheck
+
+      - name: Guardrail tests (web)
+        working-directory: apps/web
+        run: npm test

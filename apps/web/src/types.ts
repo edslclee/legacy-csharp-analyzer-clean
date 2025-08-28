@@ -1,48 +1,38 @@
 // apps/web/src/types.ts
 
-export type Column = {
-  name: string;
-  type?: string;
-  pk?: boolean;
-  nullable?: boolean;
-  fk?: { table: string; column: string } | undefined;
-};
+export interface InputFile {
+  name: string
+  /** 'cs' | 'sql' | 'doc' (지정 외 확장자 대비해 string 허용) */
+  type: 'cs' | 'sql' | 'doc' | string
+  content: string
+}
 
-export type Table = {
-  name: string;
-  columns: Column[];
-};
+export interface AnalysisResult {
+  /** Mermaid ERD (optional 로 두어 충돌 방지) */
+  erd_mermaid?: string
 
-export type CrudRow = {
-  process: string;
-  table: string;
-  ops: Array<'C' | 'R' | 'U' | 'D'>;
-};
+  tables?: Array<{
+    name: string
+    columns: Array<{
+      name: string
+      type: string
+      pk?: boolean
+      nullable?: boolean
+    }>
+  }>
 
-export type ProcessNode = {
-  name: string;
-  description?: string;
-  children?: string[];
-};
+  processes?: Array<{
+    name: string
+    description?: string
+  }>
 
-export type DocLink = {
-  doc: string;
-  snippet: string;
-  related: string;
-};
+  /** 표 렌더링 용 (행: process, 열: table, 값: operation) */
+  crudMatrix?: Array<{
+    process: string
+    table: string
+    operation: string // 'C' | 'R' | 'U' | 'D' 중 하나
+  }>
 
-export type AnalysisResult = {
-  tables: Table[];
-  erd_mermaid: string;
-  crud_matrix: CrudRow[];
-  processes: ProcessNode[];
-  doc_links: DocLink[];
-};
-
-export type CsvZipPayload = {
-  tablesCsv: string;
-  crudCsv: string;
-  processesCsv: string;
-  docsCsv: string;
-  erdPngDataUrl?: string; // ERD 탭 렌더 후 캡처 이미지 (선택)
-};
+  /** 관련 문서 링크/텍스트 모음 */
+  docs?: string[]
+}

@@ -1,8 +1,24 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "types": ["vite/client"]
+
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+
+    "skipLibCheck": true,
+    "noEmit": true,
+
+    /* 임시 완화 (필요시 이후 강화) */
+    "strict": true,
+    "noImplicitAny": false
   },
-  "include": ["src"]
+  "include": ["src", "vite-env.d.ts", "src/shims.d.ts"]
 }

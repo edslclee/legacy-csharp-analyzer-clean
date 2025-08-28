@@ -1,20 +1,43 @@
-
 {
   "compilerOptions": {
+    /* 모듈 & 타게팅 */
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "ESNext", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "esModuleInterop": true,
-    "skipLibCheck": true,
+
+    /* 타입 체크 안정화 */
     "strict": true,
-    "types": ["vite/client", "node"],
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+
+    /* 라이브러리 & 타입 */
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+
+    /* 경로 별칭 (선택) */
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
     },
-    "noEmit": true
+
+    /* 빌드 출력/레퍼런스 관련 전부 OFF */
+    "noEmit": true,
+    "declaration": false,
+    "composite": false
   },
-  "include": ["src", "vite.config.ts", "tsconfig.app.json", "tsconfig.node.json", "src/shims.d.ts"]
+  "include": [
+    "src",
+    "vite-env.d.ts",
+    "src/shims.d.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "**/__tests__/**",
+    "**/*.test.*"
+  ]
 }

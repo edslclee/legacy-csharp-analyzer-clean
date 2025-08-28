@@ -1,8 +1,28 @@
 // apps/web/src/shims.d.ts
 
+// Vite & 에셋 임포트 보조 선언
+
+declare module '*.css' {
+  const css: string
+  export default css
+}
+
+declare module '*.svg' {
+  const src: string
+  export default src
+}
 // 외부 라이브러리 타입 보완
 declare module 'file-saver' {
   export function saveAs(data: Blob | File | string, filename?: string, options?: any): void;
+}
+
+declare module 'docx' {
+  export const Document: any
+  export const Packer: any
+  export const Paragraph: any
+  export const HeadingLevel: any
+  export const TextRun: any
+  export const AlignmentType: any
 }
 
 declare module 'jszip' {
@@ -55,4 +75,8 @@ declare module '*.svg' {
   const value: string;
   export default value;
 }
-declare module 'mermaid';
+declare module 'mermaid' {
+  // 최소한의 사용만 선언 (초기 안정용)
+  const mermaid: any
+  export default mermaid
+}

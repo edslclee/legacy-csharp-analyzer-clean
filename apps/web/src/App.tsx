@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ErdViewer } from './components/ErdViewer';
 import { apiHealth, isUsingMock, setMockMode, analyzeOrMock } from './lib/api';
 import {
-  downloadJSON,
+  downloadJson,
   exportCsvZip,
   exportPdf,
   exportDocx,
@@ -180,7 +180,7 @@ export default function App() {
 
   const onDownloadJson = () => {
     if (!result) return;
-    downloadJSON(result, 'analysis.json');
+    downloadJson(result, 'analysis.json');
   };
 
   const onExportCsvZip = () => {

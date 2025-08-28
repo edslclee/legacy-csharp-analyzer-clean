@@ -9,7 +9,8 @@
     "dev": "concurrently -k -n WEB,API -c blue,magenta \"npm:dev:web\" \"npm:dev:api\"",
     "build": "npm --prefix apps/web run build && npm --prefix apps/api run build",
     "lint": "echo \"(선택) eslint/prettier 구성 가능\"",
-    "clean": "rm -rf node_modules apps/web/node_modules apps/api/node_modules"
+    "clean": "rm -rf node_modules apps/web/node_modules apps/api/node_modules",
+    "test": "npm -w apps/web run test && npm -w apps/api run test"
   },
   "devDependencies": {
     "concurrently": "^9.0.0",
