@@ -1,343 +1,323 @@
 // apps/web/src/lib/exporters.ts
-
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { jsPDF } from 'jspdf';
-import {
-  Document,
-  Packer,
-  Paragraph,
-  HeadingLevel,
-  Table,
-  TableRow,
-  TableCell,
-  WidthType,
-  TextRun,
-} from 'docx';
+import * as docx from 'docx';
 
-/** ----- Types (App과 동일한 스키마) ----- */
+/** 최소 타입 (API 타입과 호환) */
+export type CrudRow = { process: string; table: string; ops: ('C'|'R'|'U'|'D')[] };
+export type TableCol = { name: string; type?: string; pk?: boolean; nullable?: boolean; fk?: { table: string; column: string } };
+export type TableDef = { name: string; columns: TableCol[] };
+export type ProcessDef = { name: string; description?: string; children?: string[] };
+export type DocLink = { doc: string; snippet: string; related: string };
 export type AnalysisResult = {
-  tables: Array<{
-    name: string;
-    columns: Array<{
-      name: string;
-      type?: string;
-      pk?: boolean;
-      fk?: { table: string; column: string };
-      nullable?: boolean;
-    }>;
-  }>;
   erd_mermaid: string;
-  crud_matrix: Array<{
-    process: string;
-    table: string;
-    ops: Array<'C' | 'R' | 'U' | 'D'>;
-  }>;
-  processes: Array<{
-    name: string;
-    description?: string;
-    children?: string[];
-  }>;
-  doc_links: Array<{
-    doc: string;
-    snippet: string;
-    related: string;
-  }>;
+  tables: TableDef[];
+  crud_matrix: CrudRow[];
+  processes: ProcessDef[];
+  doc_links: DocLink[];
 };
 
-/** ---------------- CSV helpers (재사용 가능) ---------------- */
-export function toCsvLine(cols: (string | number | boolean)[]) {
-  return cols
-    .map((v) => {
-      const s = String(v ?? '');
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    })
-    .join(',');
+/* -------------------- 공통 유틸 -------------------- */
+
+function textToBlob(text: string, mime = 'text/plain;charset=utf-8') {
+  return new Blob([text], { type: mime });
 }
 
-export function buildTablesCsv(r: AnalysisResult) {
-  const header = toCsvLine(['Table', 'Column', 'Type', 'PK', 'Nullable', 'FK']);
-  const lines =
-    r.tables?.flatMap((t) =>
-      (t.columns ?? []).map((c) =>
-        toCsvLine([
-          t.name,
-          c.name,
-          c.type ?? '',
-          c.pk ? 'Y' : '',
-          c.nullable === false ? 'N' : 'Y',
-          c.fk ? `${c.fk.table}:${c.fk.column}` : '',
-        ]),
-      ),
-    ) ?? [];
-  return [header, ...lines].join('\n');
+function jsonToBlob(obj: unknown) {
+  return textToBlob(JSON.stringify(obj, null, 2), 'application/json;charset=utf-8');
 }
 
-export function buildCrudCsv(r: AnalysisResult) {
-  const header = toCsvLine(['Process', 'Table', 'Ops']);
-  const lines =
-    r.crud_matrix?.map((row) =>
-      toCsvLine([row.process, row.table, (row.ops ?? []).join('')]),
-    ) ?? [];
-  return [header, ...lines].join('\n');
+function tableToCsv(tables: TableDef[]) {
+  const lines: string[] = ['Table,Column,Type,PK,Nullable,FK.Table,FK.Column'];
+  for (const t of tables ?? []) {
+    for (const c of t.columns ?? []) {
+      lines.push([
+        wrapCsv(t.name),
+        wrapCsv(c.name),
+        wrapCsv(c.type ?? ''),
+        c.pk ? 'Y' : '',
+        c.nullable === false ? 'N' : 'Y',
+        wrapCsv(c.fk?.table ?? ''),
+        wrapCsv(c.fk?.column ?? ''),
+      ].join(','));
+    }
+  }
+  return lines.join('\n');
 }
 
-export function buildProcessesCsv(r: AnalysisResult) {
-  const header = toCsvLine(['Name', 'Description', 'Children']);
-  const lines =
-    r.processes?.map((p) =>
-      toCsvLine([p.name, p.description ?? '', (p.children ?? []).join(' | ')]),
-    ) ?? [];
-  return [header, ...lines].join('\n');
+function crudToCsv(crud: CrudRow[]) {
+  const lines: string[] = ['Process,Table,Ops'];
+  for (const r of crud ?? []) {
+    lines.push([wrapCsv(r.process), wrapCsv(r.table), wrapCsv((r.ops ?? []).join(''))].join(','));
+  }
+  return lines.join('\n');
 }
 
-export function buildDocsCsv(r: AnalysisResult) {
-  const header = toCsvLine(['Doc', 'Snippet', 'Related']);
-  const lines =
-    r.doc_links?.map((d) => toCsvLine([d.doc, d.snippet, d.related])) ?? [];
-  return [header, ...lines].join('\n');
+function processesToCsv(procs: ProcessDef[]) {
+  const lines: string[] = ['Name,Description,Children'];
+  for (const p of procs ?? []) {
+    lines.push([wrapCsv(p.name), wrapCsv(p.description ?? ''), wrapCsv((p.children ?? []).join(' > '))].join(','));
+  }
+  return lines.join('\n');
 }
 
-/** ---------------- 공통 유틸 ---------------- */
-function dataUrlToBlob(dataUrl: string): Blob {
-  const [meta, base64] = dataUrl.split(',');
-  const mimeMatch = /data:([^;]+);base64/.exec(meta || '');
-  const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
-  const bin = atob(base64 || '');
-  const arr = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-  return new Blob([arr], { type: mime });
+function docsToCsv(docs: DocLink[]) {
+  const lines: string[] = ['Doc,Snippet,Related'];
+  for (const d of docs ?? []) {
+    lines.push([wrapCsv(d.doc), wrapCsv(d.snippet), wrapCsv(d.related)].join(','));
+  }
+  return lines.join('\n');
 }
 
-/** ---------------- JSON 다운로드 ---------------- */
-export function downloadJSON(result: AnalysisResult, filename = 'result.json') {
-  const blob = new Blob([JSON.stringify(result, null, 2)], {
-    type: 'application/json',
-  });
-  saveAs(blob, filename);
+function wrapCsv(s: string) {
+  if (s == null) return '';
+  const needsQuote = /[",\n]/.test(s);
+  return needsQuote ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** ---------------- CSV Zip ---------------- */
-export async function exportCsvZip(
-  result: AnalysisResult,
-  filename = 'analysis-csv.zip',
-) {
+/* -------------------- JSON -------------------- */
+
+export function downloadJson(data: unknown, filename = 'result.json') {
+  saveAs(jsonToBlob(data), filename);
+}
+
+/* downloadJSON 별칭 제공 (App.tsx 가 기존 이름을 그대로 써도 동작하게) */
+export const downloadJSON = downloadJson;
+
+/* -------------------- CSV ZIP -------------------- */
+
+export async function exportCsvZip(result: AnalysisResult, filename = 'analysis-csv.zip') {
   const zip = new JSZip();
-  zip.file('tables.csv', buildTablesCsv(result));
-  zip.file('crud.csv', buildCrudCsv(result));
-  zip.file('processes.csv', buildProcessesCsv(result));
-  zip.file('docs.csv', buildDocsCsv(result));
+  zip.file('tables.csv', tableToCsv(result.tables || []));
+  zip.file('crud.csv', crudToCsv(result.crud_matrix || []));
+  zip.file('processes.csv', processesToCsv(result.processes || []));
+  zip.file('docs.csv', docsToCsv(result.doc_links || []));
+  zip.file('erd_mermaid.mmd', result.erd_mermaid ?? '');
+
   const blob = await zip.generateAsync({ type: 'blob' });
   saveAs(blob, filename);
 }
 
-/** ---------------- PDF (Blob 생성) ---------------- */
-export async function createPdfBlob(
-  result: AnalysisResult,
-  opts?: { erdPngDataUrl?: string },
-): Promise<Blob> {
-  const { erdPngDataUrl } = opts || {};
+/* exportCSVZip 별칭 제공 */
+export const exportCSVZip = exportCsvZip;
+
+/* -------------------- PDF -------------------- */
+
+export async function exportPdf(result: AnalysisResult, opts?: { erdSvg?: SVGSVGElement | null; filename?: string }) {
+  const { erdSvg = null, filename = 'AsIs_Report.pdf' } = opts || {};
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   const margin = 40;
   let y = margin;
 
-  const line = (text: string, step = 16) => {
-    doc.text(text, margin, y);
-    y += step;
-  };
-  const h = (text: string) => {
-    doc.setFont(undefined, 'bold');
-    line(text, 20);
-    doc.setFont(undefined, 'normal');
-  };
+  const line = (text: string, step = 16) => { doc.text(text, margin, y); y += step; };
+  const h = (text: string) => { doc.setFont(undefined, 'bold'); line(text, 20); doc.setFont(undefined, 'normal'); };
 
   h('As-Is Navigator Report');
   line(new Date().toISOString(), 18);
-  y += 4;
 
   h('Summary');
   line(`Tables: ${result.tables?.length ?? 0}`);
   line(`CRUD Rows: ${result.crud_matrix?.length ?? 0}`);
   line(`Processes: ${result.processes?.length ?? 0}`);
   line(`Doc Links: ${result.doc_links?.length ?? 0}`);
-  y += 8;
+  y += 10;
 
-  if (erdPngDataUrl) {
-    h('ERD');
+  // ERD (가능하면 SVG→PNG 변환 후 삽입)
+  if (erdSvg) {
     try {
-      doc.addImage(erdPngDataUrl, 'PNG', margin, y, 520, 320, undefined, 'FAST');
+      const dataUrl = await svgToPngDataUrl(erdSvg, 1040, 640);
+      doc.addImage(dataUrl, 'PNG', margin, y, 520, 320, undefined, 'FAST');
       y += 330;
     } catch {
-      // ignore
+      // 무시
     }
   }
 
-  h('Tables (snapshot)');
-  for (const t of (result.tables ?? []).slice(0, 10)) {
-    line(`• ${t.name} : ${(t.columns ?? []).length} cols`);
-  }
-
-  // jsPDF는 save()가 아닌 output('blob')으로 Blob 추출 가능
-  return doc.output('blob');
-}
-
-export async function exportPdf(
-  result: AnalysisResult,
-  opts?: { erdPngDataUrl?: string; filename?: string },
-) {
-  const blob = await createPdfBlob(result, { erdPngDataUrl: opts?.erdPngDataUrl });
-  saveAs(blob, opts?.filename ?? 'AsIs_Report.pdf');
-}
-
-/** ---------------- DOCX (Blob 생성) ---------------- */
-export async function createDocxBlob(
-  result: AnalysisResult,
-): Promise<Blob> {
-  const sections: Paragraph[] = [];
-
-  sections.push(
-    new Paragraph({
-      text: 'As-Is Navigator Report',
-      heading: HeadingLevel.HEADING_1,
-    }),
-  );
-  sections.push(new Paragraph({ text: new Date().toISOString(), spacing: { after: 200 } }));
-
-  sections.push(new Paragraph({ text: 'Summary', heading: HeadingLevel.HEADING_2 }));
-  sections.push(
-    new Paragraph(
-      `Tables: ${result.tables?.length ?? 0}, CRUD Rows: ${
-        result.crud_matrix?.length ?? 0
-      }, Processes: ${result.processes?.length ?? 0}, Doc Links: ${
-        result.doc_links?.length ?? 0
-      }`,
-    ),
-  );
-
-  sections.push(new Paragraph({ text: 'Tables', heading: HeadingLevel.HEADING_2 }));
-
-  const rows: TableRow[] = [
-    new TableRow({
-      children: [
-        new TableCell({
-          width: { size: 30, type: WidthType.PERCENTAGE },
-          children: [new Paragraph({ text: 'Table', bold: true })],
-        }),
-        new TableCell({
-          width: { size: 70, type: WidthType.PERCENTAGE },
-          children: [new Paragraph({ text: 'Columns', bold: true })],
-        }),
-      ],
-    }),
-  ];
-
+  h('Tables');
   for (const t of result.tables ?? []) {
-    const cols =
-      t.columns?.map(
-        (c) =>
-          `${c.name}${c.pk ? ' [PK]' : ''}${c.fk ? ` [FK→${c.fk.table}.${c.fk.column}]` : ''}`,
-      ) ?? [];
-    rows.push(
-      new TableRow({
-        children: [
-          new TableCell({ children: [new Paragraph(t.name)] }),
-          new TableCell({ children: [new Paragraph({ children: [new TextRun(cols.join(', '))] })] }),
-        ],
-      }),
-    );
+    line(`• ${t.name}`, 18);
+    for (const c of t.columns ?? []) {
+      line(`  - ${c.name} ${c.type ?? ''} ${c.pk ? '(PK)' : ''} ${c.nullable === false ? 'NOT NULL' : ''}`);
+      if (y > 760) { doc.addPage(); y = margin; }
+    }
+    y += 6;
+    if (y > 760) { doc.addPage(); y = margin; }
   }
 
-  const tablesTable = new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    rows,
-  });
+  h('CRUD Matrix');
+  for (const r of result.crud_matrix ?? []) {
+    line(`• ${r.process} - ${r.table} [${(r.ops ?? []).join('')}]`);
+    if (y > 760) { doc.addPage(); y = margin; }
+  }
 
-  const doc = new Document({
-    sections: [{ children: [...sections, tablesTable] }],
-  });
+  h('Processes');
+  for (const p of result.processes ?? []) {
+    line(`• ${p.name} ${p.description ? `- ${p.description}` : ''}`);
+    if (p.children?.length) line(`  children: ${p.children.join(' > ')}`);
+    if (y > 760) { doc.addPage(); y = margin; }
+  }
 
-  return Packer.toBlob(doc);
+  h('Doc Links');
+  for (const d of result.doc_links ?? []) {
+    line(`• ${d.doc} :: ${d.related}`);
+    if (d.snippet) line(`  ${d.snippet}`);
+    if (y > 760) { doc.addPage(); y = margin; }
+  }
+
+  doc.save(filename);
 }
 
-export async function exportDocx(
-  result: AnalysisResult,
-  opts?: { filename?: string },
-) {
-  const blob = await createDocxBlob(result);
-  saveAs(blob, opts?.filename ?? 'AsIs_Report.docx');
+/* -------------------- DOCX -------------------- */
+
+export async function exportDocx(result: AnalysisResult, filename = 'AsIs_Report.docx') {
+  const P = docx.Paragraph;
+  const T = docx.TextRun;
+
+  const title = new P({ children: [new T({ text: 'As-Is Navigator Report', bold: true, size: 28 })] });
+  const doc = new docx.Document({
+    sections: [
+      {
+        children: [
+          title,
+          new P({ children: [new T({ text: new Date().toISOString(), size: 16 })] }),
+          new P({ children: [new T({ text: '' })] }),
+
+          new P({ children: [new T({ text: 'Summary', bold: true, size: 24 })] }),
+          new P({ children: [new T(`Tables: ${result.tables?.length ?? 0}`)] }),
+          new P({ children: [new T(`CRUD Rows: ${result.crud_matrix?.length ?? 0}`)] }),
+          new P({ children: [new T(`Processes: ${result.processes?.length ?? 0}`)] }),
+          new P({ children: [new T(`Doc Links: ${result.doc_links?.length ?? 0}`)] }),
+          new P({ children: [new T({ text: '' })] }),
+
+          new P({ children: [new T({ text: 'Tables', bold: true, size: 24 })] }),
+          ...((result.tables ?? []).flatMap(t => [
+            new P({ children: [new T({ text: `• ${t.name}`, bold: true })] }),
+            ...(t.columns ?? []).map(c =>
+              new P({ children: [new T(`  - ${c.name} ${c.type ?? ''} ${c.pk ? '(PK)' : ''} ${c.nullable === false ? 'NOT NULL' : ''}`)] })
+            ),
+          ])),
+
+          new P({ children: [new T({ text: '' })] }),
+          new P({ children: [new T({ text: 'CRUD Matrix', bold: true, size: 24 })] }),
+          ...((result.crud_matrix ?? []).map(r =>
+            new P({ children: [new T(`• ${r.process} - ${r.table} [${(r.ops ?? []).join('')}]`)] })
+          )),
+
+          new P({ children: [new T({ text: '' })] }),
+          new P({ children: [new T({ text: 'Processes', bold: true, size: 24 })] }),
+          ...((result.processes ?? []).map(p => [
+            new P({ children: [new T(`• ${p.name}${p.description ? ` - ${p.description}` : ''}`)] }),
+            ...(p.children?.length ? [new P({ children: [new T(`  children: ${p.children.join(' > ')}`)] })] : []),
+          ]) as any).flat(),
+
+          new P({ children: [new T({ text: '' })] }),
+          new P({ children: [new T({ text: 'Doc Links', bold: true, size: 24 })] }),
+          ...((result.doc_links ?? []).map(d => [
+            new P({ children: [new T(`• ${d.doc} :: ${d.related}`)] }),
+            ...(d.snippet ? [new P({ children: [new T(`  ${d.snippet}`)] })] : []),
+          ]) as any).flat(),
+        ],
+      },
+    ],
+  });
+
+  const blob = await docx.Packer.toBlob(doc as any);
+  saveAs(blob, filename);
 }
 
-/** ---------------- 통합 Zip (JSON+CSV+ERD.mmd+ERD.png+PDF+DOCX) ---------------- */
+/* -------------------- SVG → PNG (ERD 다이어그램) -------------------- */
+
+export async function exportDiagramPngFromSvg(svgEl: SVGSVGElement, filename = 'erd.png') {
+  const dataUrl = await svgToPngDataUrl(svgEl, 1600, 1000);
+  saveAs(dataUrlToBlob(dataUrl), filename);
+}
+
+async function svgToPngDataUrl(svgEl: SVGSVGElement, width = 1600, height = 1000) {
+  const clone = svgEl.cloneNode(true) as SVGSVGElement;
+  clone.setAttribute('width', String(width));
+  clone.setAttribute('height', String(height));
+  const svgText = new XMLSerializer().serializeToString(clone);
+  const svgBlob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+  const svgUrl = URL.createObjectURL(svgBlob);
+
+  const img = new Image();
+  // 사파리/크롬 CORS 회피
+  img.crossOrigin = 'anonymous';
+
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = (e) => reject(e);
+    img.src = svgUrl;
+  });
+  URL.revokeObjectURL(svgUrl);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(img, 0, 0, width, height);
+
+  return canvas.toDataURL('image/png');
+}
+
+function dataUrlToBlob(dataUrl: string) {
+  const [header, data] = dataUrl.split(',');
+  const isBase64 = /;base64$/.test(header);
+  const mime = header.split(':')[1].split(';')[0];
+  const bin = isBase64 ? atob(data) : decodeURIComponent(data);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Blob([u8], { type: mime });
+}
+
+/* -------------------- 번들 ZIP (선택) -------------------- */
+
 export async function exportAllZip(
   result: AnalysisResult,
-  opts?: {
-    filename?: string;
-    /** ERD Canvas 등에서 얻은 dataURL (PNG) */
-    erdPngDataUrl?: string;
-    includePdf?: boolean;
-    includeDocx?: boolean;
-    /** 파일명 커스터마이즈 */
-    names?: {
-      json?: string;
-      tablesCsv?: string;
-      crudCsv?: string;
-      processesCsv?: string;
-      docsCsv?: string;
-      erdMmd?: string;
-      erdPng?: string;
-      pdf?: string;
-      docx?: string;
-    };
-  },
+  opts?: { erdSvg?: SVGSVGElement | null; filename?: string }
 ) {
-  const {
-    filename = 'as-is-report.zip',
-    erdPngDataUrl,
-    includePdf = true,
-    includeDocx = true,
-  } = opts ?? {};
-
-  const names = {
-    json: opts?.names?.json ?? 'result.json',
-    tablesCsv: opts?.names?.tablesCsv ?? 'tables.csv',
-    crudCsv: opts?.names?.crudCsv ?? 'crud.csv',
-    processesCsv: opts?.names?.processesCsv ?? 'processes.csv',
-    docsCsv: opts?.names?.docsCsv ?? 'docs.csv',
-    erdMmd: opts?.names?.erdMmd ?? 'ERD.mmd',
-    erdPng: opts?.names?.erdPng ?? 'ERD.png',
-    pdf: opts?.names?.pdf ?? 'AsIs_Report.pdf',
-    docx: opts?.names?.docx ?? 'AsIs_Report.docx',
-  };
-
+  const { erdSvg = null, filename = 'analysis-bundle.zip' } = opts || {};
   const zip = new JSZip();
 
   // JSON
-  zip.file(names.json, JSON.stringify(result, null, 2));
+  zip.file('result.json', JSON.stringify(result, null, 2));
 
   // CSVs
-  zip.file(names.tablesCsv, buildTablesCsv(result));
-  zip.file(names.crudCsv, buildCrudCsv(result));
-  zip.file(names.processesCsv, buildProcessesCsv(result));
-  zip.file(names.docsCsv, buildDocsCsv(result));
+  zip.file('tables.csv', tableToCsv(result.tables || []));
+  zip.file('crud.csv', crudToCsv(result.crud_matrix || []));
+  zip.file('processes.csv', processesToCsv(result.processes || []));
+  zip.file('docs.csv', docsToCsv(result.doc_links || []));
 
-  // ERD (mermaid)
-  zip.file(names.erdMmd, result.erd_mermaid || 'erDiagram');
+  // Mermaid
+  zip.file('erd_mermaid.mmd', result.erd_mermaid ?? '');
 
-  // ERD PNG (dataURL → Blob)
-  if (erdPngDataUrl) {
-    zip.file(names.erdPng, dataUrlToBlob(erdPngDataUrl));
+  // ERD PNG
+  if (erdSvg) {
+    try {
+      const dataUrl = await svgToPngDataUrl(erdSvg, 1600, 1000);
+      zip.file('erd.png', dataUrl.split(',')[1]!, { base64: true });
+    } catch {
+      // 무시
+    }
   }
 
-  // PDF / DOCX
-  if (includePdf) {
-    const pdfBlob = await createPdfBlob(result, { erdPngDataUrl });
-    zip.file(names.pdf, pdfBlob);
-  }
-  if (includeDocx) {
-    const docxBlob = await createDocxBlob(result);
-    zip.file(names.docx, docxBlob);
-  }
+  // PDF / DOCX (간단 버전 텍스트)
+  const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
+  pdf.text('As-Is Navigator PDF (see app export for full version)', 40, 60);
+  const pdfBlob = pdf.output('blob');
+  zip.file('report.pdf', await pdfBlob.arrayBuffer());
+
+  const doc = new docx.Document({
+    sections: [{ children: [new docx.Paragraph('As-Is Navigator DOCX (see app export for full version)')] }],
+  });
+  const docBlob = await docx.Packer.toBlob(doc as any);
+  zip.file('report.docx', await docBlob.arrayBuffer());
 
   const blob = await zip.generateAsync({ type: 'blob' });
   saveAs(blob, filename);
 }
+// 호환용 별칭 추가:
+export const exportZipBundle = exportAllZip;
